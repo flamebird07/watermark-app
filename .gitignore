@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+*.log
+.watermark_app_cache/
+*.onnx
+.DS_Store
+Thumbs.db
