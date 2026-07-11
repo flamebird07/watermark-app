@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIcon
 from PySide6.QtCore import Qt
 
 from watermark_app.ui.main_window import MainWindow
@@ -28,6 +28,11 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("水印去除工具")
     app.setOrganizationName("WatermarkApp")
+
+    # Set app icon
+    icon_path = Path(__file__).parent.parent / "assets" / "app.ico"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
 
     # Dark theme
     app.setStyleSheet("""
