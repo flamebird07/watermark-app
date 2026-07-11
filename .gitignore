@@ -11,3 +11,4 @@ build/
 *.onnx
 .DS_Store
 Thumbs.db
+.venv/
