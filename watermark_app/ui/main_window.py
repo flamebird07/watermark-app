@@ -37,6 +37,11 @@ class MainWindow(QMainWindow):
         self._fixed_position = None
 
         self._init_ui()
+        # Default to 豆包右下角 preset (most common use case)
+        # Must be AFTER all UI controls are created
+        self._preset_combo.setCurrentIndex(1)  # index 1 = douyin_bottom_right
+        self._on_preset_changed(1)
+
         self._connect_signals()
 
     def _init_ui(self):

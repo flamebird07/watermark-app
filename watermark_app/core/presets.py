@@ -8,8 +8,8 @@ PRESETS = {
         'corner': 'bottom-right',
         'scan_pct': 0.18,
         'backend': 'lama',
-        'fixed_position': (80, 85, 100, 100),
-        'padding': 15,
+        'fixed_position': (82, 94, 99, 98),
+        'padding': 3,
     },
     'template_match': {
         'name': '模板匹配',

@@ -124,6 +124,62 @@ class LaMaInpainter:
         return output
 
 
+def _opencv_postprocess(
+    original: np.ndarray,
+    repaired: np.ndarray,
+    mask: np.ndarray,
+    feather: int = 3,
+) -> np.ndarray:
+    """Poisson blending with color correction for natural seam."""
+    del feather
+
+    watermark_mask = np.where(mask > 0, 255, 0).astype(np.uint8)
+    if cv2.countNonZero(watermark_mask) == 0:
+        return original.copy()
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    inner_ring = cv2.subtract(
+        watermark_mask,
+        cv2.erode(watermark_mask, kernel, iterations=1),
+    )
+    outer_ring = cv2.subtract(
+        cv2.dilate(watermark_mask, kernel, iterations=2),
+        watermark_mask,
+    )
+
+    source = repaired.copy()
+    if cv2.countNonZero(inner_ring) and cv2.countNonZero(outer_ring):
+        original_lab = cv2.cvtColor(original, cv2.COLOR_BGR2LAB).astype(np.float32)
+        repaired_lab = cv2.cvtColor(repaired, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+        outer_color = np.median(original_lab[outer_ring > 0], axis=0)
+        inner_color = np.median(repaired_lab[inner_ring > 0], axis=0)
+        color_shift = np.clip(outer_color - inner_color, -12.0, 12.0)
+
+        repaired_lab[watermark_mask > 0] += color_shift
+        source = cv2.cvtColor(
+            np.clip(repaired_lab, 0, 255).astype(np.uint8),
+            cv2.COLOR_LAB2BGR,
+        )
+
+    height, width = original.shape[:2]
+    # Center point MUST be inside the mask for seamlessClone to work
+    ys, xs = np.where(watermark_mask > 0)
+    if len(xs) == 0:
+        return original.copy()
+    center = (int(np.mean(xs)), int(np.mean(ys)))
+    output = cv2.seamlessClone(
+        source,
+        original,
+        watermark_mask,
+        center,
+        cv2.NORMAL_CLONE,
+    )
+
+    output[watermark_mask == 0] = original[watermark_mask == 0]
+    return output
+
+
 def opencv_inpaint(image: np.ndarray, mask: np.ndarray, radius: int = 5,
                    method: int = cv2.INPAINT_TELEA) -> np.ndarray:
     image = _normalise_image(image)

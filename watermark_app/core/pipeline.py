@@ -11,9 +11,9 @@ import numpy as np
 
 from .inpainting import get_lama_inpainter, opencv_inpaint
 from .io import cv2_read, cv2_read_gray, cv2_write_with_size_limit, save_exif
-from .masks import (auto_detect_watermark, corner_mask, dilate_mask,
-                    external_mask, has_watermark_edges,
-                    multi_scale_template_mask, region_mask)
+from .masks import (auto_detect_watermark, corner_mask, detect_doubao_watermark,
+                    dilate_mask, external_mask, multi_scale_template_mask,
+                    region_mask, _refine_mask_to_watermark_edges)
 
 
 @dataclass
@@ -27,6 +27,57 @@ class ProcessResult:
     warnings: list = field(default_factory=list)
     error_code: str = ''
     mask_generated: Optional[np.ndarray] = None
+
+
+def _detect_residual_watermark(output, mask, original_gray):
+    """Check if watermark strokes remain after inpainting.
+
+    Compares edge content in the repaired region against the original.
+    Returns a mask of residual candidates, or None if clean.
+    """
+    output_gray = cv2.cvtColor(np.ascontiguousarray(output), cv2.COLOR_BGR2GRAY)
+    # Dilate original mask slightly to capture surrounding area
+    check_mask = cv2.dilate(mask,
+                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+                            iterations=1)
+    ys, xs = np.where(check_mask > 0)
+    if len(xs) < 10:
+        return None
+
+    y1, y2 = max(0, ys.min()), min(output.shape[0], ys.max() + 1)
+    x1, x2 = max(0, xs.min()), min(output.shape[1], xs.max() + 1)
+
+    roi_out = output_gray[y1:y2, x1:x2]
+    roi_orig = original_gray[y1:y2, x1:x2]
+
+    if roi_out.size < 9:
+        return None
+
+    # Extract candidates from repaired region
+    from .masks import _extract_watermark_candidates
+    candidates = _extract_watermark_candidates(roi_out)
+    if candidates is None:
+        return None
+
+    # Compare: if repaired region has significantly more candidates than
+    # a smooth inpainting would produce, those are residuals.
+    cand_ratio = cv2.countNonZero(candidates) / max(1, candidates.size)
+    if cand_ratio < 0.02:
+        return None  # Clean enough
+
+    # Also check original: if original had similar edge density in this
+    # region, it's likely background texture, not residual watermark.
+    orig_edges = cv2.Canny(roi_orig, 50, 150)
+    orig_ratio = cv2.countNonZero(orig_edges) / max(1, orig_edges.size)
+    if cand_ratio < orig_ratio * 0.5:
+        return None  # Residual is less than original texture
+
+    # Build residual mask in full-image coordinates
+    result = np.zeros_like(mask)
+    result[y1:y2, x1:x2] = candidates
+    # Only keep pixels that were NOT in the original mask (true residuals)
+    result = cv2.bitwise_and(result, cv2.bitwise_not(mask))
+    return result if cv2.countNonZero(result) > 0 else None
 
 
 def process(input_path: str, output_path: str = '', mode: str = 'corner',
@@ -77,11 +128,24 @@ def process(input_path: str, output_path: str = '', mode: str = 'corner',
                 return result
             mask = multi_scale_template_mask(gray, template)
         elif mode == 'corner':
-            if not has_watermark_edges(gray, corner, scan_pct, fixed_position=fixed_position):
-                result.warnings.append(f'No strong watermark edges detected in {corner}; processing requested area')
-            mask = corner_mask(h, w, corner, scan_pct, fixed_position, gray)
-            if fixed_position is not None and mask is None:
-                result.warnings.append('No watermark-like strokes found in fixed_position; source left unchanged')
+            mask = None
+            ocr_bbox = None
+            # Step 1: Try OCR-based detection for precise positioning
+            if image is not None:
+                ocr_result = detect_doubao_watermark(image, corner, scan_pct)
+                if ocr_result is not None:
+                    if len(ocr_result) == 3:
+                        _, _, ocr_bbox = ocr_result
+                    result.warnings.append(f'OCR watermark detected')
+            # Step 2: Use fixed_position if available (more precise than OCR bbox)
+            # OCR bbox often has extra padding; fixed_position is tighter
+            if fixed_position is not None:
+                mask = corner_mask(h, w, corner, scan_pct, fixed_position=fixed_position)
+            elif ocr_bbox is not None:
+                mask = corner_mask(h, w, corner, scan_pct, ocr_bbox=ocr_bbox)
+            else:
+                # Auto corner rectangle
+                mask = corner_mask(h, w, corner, scan_pct)
         elif mode == 'region':
             if region is None:
                 result.status, result.error_code = 'failed', 'NO_REGION'
@@ -126,6 +190,23 @@ def process(input_path: str, output_path: str = '', mode: str = 'corner',
             result.status, result.error_code = 'failed', 'INVALID_BACKEND'
             return result
         result.backend_used = backend
+
+        # --- Residual detection and secondary repair ---
+        # After inpainting, check if watermark candidates remain in the
+        # repaired region. If so, expand mask slightly and re-inpaint.
+        if mode == 'corner' and output is not None:
+            residual_mask = _detect_residual_watermark(output, mask, gray)
+            if residual_mask is not None and cv2.countNonZero(residual_mask) > 0:
+                result.warnings.append('Residual watermark detected; running secondary repair')
+                combined_mask = cv2.bitwise_or(mask, residual_mask)
+                combined_mask = cv2.dilate(combined_mask,
+                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+                    iterations=1)
+                if backend == 'lama':
+                    output = get_lama_inpainter().inpaint(image, combined_mask)
+                elif backend == 'opencv':
+                    output = opencv_inpaint(image, combined_mask)
+                result.mask_generated = combined_mask
 
         report(.8, 'Saving result...')
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
